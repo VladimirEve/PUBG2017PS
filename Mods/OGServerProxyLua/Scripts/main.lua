@@ -47,6 +47,22 @@ function FRotator(Pitch, Yaw, Roll)
     }
 end
 
+-- Custom implementation of atan2, as it's missing from the game's Lua environment.
+function atan2_custom(y, x)
+    if x > 0 then
+        return math.atan(y / x)
+    elseif x < 0 and y >= 0 then
+        return math.atan(y / x) + 3.14159
+    elseif x < 0 and y < 0 then
+        return math.atan(y / x) - 3.14159
+    elseif x == 0 and y > 0 then
+        return 3.14159 / 2
+    elseif x == 0 and y < 0 then
+        return -3.14159 / 2
+    end
+    return 0 -- x == 0 and y == 0
+end
+
 function FVector(X, Y, Z)
     return {
         ["X"] = X,
@@ -176,8 +192,8 @@ function Init()
                         local serverPlayer = FindFirstOf("TslPlayerController")
                         if serverPlayer:IsValid() and serverPlayer:HasAuthority() then
                             print("We are a server, continue to do our stuff")
-                            GlobalTransportAirplane = SpawnAircraft()
-                            GlobalTransportAirplane:EnterAtEjectionArea()
+                            -- GlobalTransportAirplane = SpawnAircraft()
+                            -- GlobalTransportAirplane:EnterAtEjectionArea()
                             -- SpawnTestingPlayerPawn()
 
                             LoopAsync(
@@ -431,6 +447,67 @@ function SpawnAircraft()
     end
 end
 
+function StartManualFlightPath()
+    if (GlobalTransportAirplane == nil or not GlobalTransportAirplane:IsValid()) then
+        print("Cannot start manual flight, airplane is not valid.")
+        return
+    end
+
+    print("Starting manual flight path...")
+
+    local startPos = {
+        X = 338062.06,
+        Y = 170761.37,
+        Z = AirbroneMatchPreparer.AircraftAltitude
+    }
+
+    -- Define an end point on the other side of the map
+    local endPos = {
+        X = 650000.0,
+        Y = 650000.0,
+        Z = AirbroneMatchPreparer.AircraftAltitude
+    }
+
+    local speed = 2222 -- cm/s (approx 80 km/h)
+    local interval = 0.1 -- Loop runs every 100ms
+
+    local deltaX = endPos.X - startPos.X
+    local deltaY = endPos.Y - startPos.Y
+    local totalDistance = math.sqrt(deltaX * deltaX + deltaY * deltaY)
+    local totalFlightTime = totalDistance / speed
+
+    -- Calculate yaw for the aircraft to face the destination using our custom atan2
+    local flightYaw = (atan2_custom(deltaY, deltaX) * 180) / 3.14159
+    local flightRotation = FRotator(0.0, flightYaw, 0.0)
+
+    local flightProgress = 0.0 -- 0.0 at start, 1.0 at end
+
+    LoopAsync(100, function()
+        if (GlobalTransportAirplane == nil or not GlobalTransportAirplane:IsValid()) then
+            print("Airplane disappeared, stopping flight loop.")
+            return true -- Stop loop
+        end
+
+        local elapsedTime = interval
+        flightProgress = flightProgress + (elapsedTime / totalFlightTime)
+
+        if flightProgress >= 1.0 then
+            print("Flight path finished.")
+            return true -- Stop loop
+        end
+
+        local currentPos = {
+            X = startPos.X + (deltaX * flightProgress),
+            Y = startPos.Y + (deltaY * flightProgress),
+            Z = startPos.Z
+        }
+
+        GlobalTransportAirplane:K2_TeleportTo(currentPos, flightRotation)
+
+        return false -- Continue loop
+    end)
+end
+
 function Hook_K2_OnRestartPlayer(object, func, param)
     local player = param:get()
     print("K2_OnRestartPlayer::before" .. player:K2_GetPawn():GetFName():ToString())
@@ -528,6 +605,49 @@ function Hook_K2_OnSetMatchState(object, func, param)
     if state == "InProgress" then
         print("Game is in progress, we can start our stuff")
         GameStarted = true
+        if (GlobalTransportAirplane == nil) then
+            GlobalTransportAirplane = SpawnAircraft()
+        end
+        if (GlobalTransportAirplane ~= nil and GlobalTransportAirplane:IsValid()) then
+            -- Put players into the aircraft
+            local playerPawns = GetAllPlayerPawns()
+            if (playerPawns ~= nil and #playerPawns > 0) then
+                print("Putting " .. #playerPawns .. " players into aircraft...")
+                local seats = GlobalTransportAirplane.VehicleSeatComponent:GetSeats()
+                local seatIndex = 1
+                for i = 1, #playerPawns do
+                    local pawn = playerPawns[i]
+                    if (pawn:IsValid()) then
+                        -- Find an empty seat
+                        local seatFound = false
+                        while (seatIndex <= #seats) do
+                            local seat = seats[seatIndex]:get()
+                            if (seat:IsValid() and not seat.Rider:IsValid()) then
+                                print("Putting player " .. pawn:GetFullName() .. " into a seat.")
+                                GlobalTransportAirplane.VehicleSeatComponent:Ride(pawn, seat)
+                                seat.Rider = pawn
+                                seatIndex = seatIndex + 1
+                                seatFound = true
+                                break
+                            end
+                            seatIndex = seatIndex + 1
+                        end
+                        if not seatFound then
+                            print("No more seats available.")
+                            break
+                        end
+                    end
+                end
+            else
+                print("No players found to put into aircraft.")
+            end
+
+            -- Start the manual flight path
+            StartManualFlightPath()
+
+            print("Enabling ejection")
+            GlobalTransportAirplane:EnterAtEjectionArea()
+        end
         Hook_GameStarted()
     -- TeleportPlayersToStartPoint()
     end
